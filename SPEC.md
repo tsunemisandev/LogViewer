@@ -1,573 +1,358 @@
-# Smart Log Viewer — Specification
+# Smart Log Viewer — Technical Specification
 
-## Stack
-
-- **Java 17** — no third-party libraries
-- **Swing** — GUI with Windows-style LookAndFeel
-- **ServiceLoader** — plugin discovery
-- **URLClassLoader** — external plugin JARs
+現在の実装状態を反映した仕様書です。
 
 ---
 
-## Project Layout
+## スタック
+
+- **Java 17**（サードパーティライブラリなし）
+- **Swing** — システム LookAndFeel
+- **Gradle 9.x** マルチプロジェクト構成
+- **ServiceLoader** — プラグイン発見
+- **URLClassLoader** — 外部プラグイン JAR 読み込み
+- **java.util.Properties** — 設定ファイル
+
+---
+
+## プロジェクト構成
 
 ```
-logviewer/
-├── logviewer.jar          ← main application
-├── plugin-api.jar         ← public interfaces only (shipped separately)
-├── plugins/               ← drop external plugin JARs here
-│   ├── recorder-plugin.jar
-│   └── html-renderer-plugin.jar
-├── recordings/            ← files saved by RecorderPlugin
-└── config.properties
+LogViewer/
+├── app/                          # メインアプリ（Plugin API + UI + RawStreamPlugin）
+│   └── src/main/java/com/logviewer/
+│       ├── AppMain.java
+│       ├── config/AppConfig.java
+│       ├── ui/MainWindow.java
+│       ├── pipeline/
+│       │   ├── LogPipeline.java
+│       │   ├── FileLineReader.java
+│       │   ├── LineAssembler.java
+│       │   ├── LineAssemblerStrategy.java
+│       │   └── PrefixDateStrategy.java
+│       ├── plugin/
+│       │   ├── Plugin.java
+│       │   ├── RawStreamPlugin.java
+│       │   └── ExternalPluginLoader.java
+│       ├── source/
+│       │   ├── LogSource.java
+│       │   └── FileLogSource.java
+│       └── model/
+│           ├── LogEvent.java
+│           └── LogRecord.java
+├── builtin-plugins/              # 組み込みプラグイン（外部 JAR として配置）
+│   └── src/main/java/com/logviewer/plugin/
+│       ├── FieldExtractorPlugin.java    (priority -20)
+│       ├── LevelNormalizerPlugin.java   (priority -10)
+│       ├── GridPlugin.java
+│       ├── HtmlPlugin.java
+│       ├── StatsPlugin.java
+│       ├── RecorderPlugin.java
+│       ├── CheckResultHtmlPlugin.java
+│       ├── MethodTraceHtmlPlugin.java
+│       └── extractor/
+│           ├── FieldExtractor.java
+│           ├── ColonExtractor.java
+│           └── SlashPairExtractor.java
+├── sample-plugin/                # 外部プラグインサンプル
+│   └── src/main/java/com/logviewer/sample/
+│       └── CheckResultTablePlugin.java
+├── plugins/                      # ビルド時に生成（./gradlew copyPlugins）
+│   ├── builtin-plugins.jar
+│   └── check-result-table-plugin.jar
+├── recordings/                   # RecorderPlugin の出力先（実行時生成）
+└── sample.log
 ```
 
 ---
 
-## Configuration
+## 設定ファイル
 
-File: `./config.properties` (beside the running JAR)
+パス: `~/.logviewer/config.properties`（`AppConfig` が自動で読み書き）
 
 ```properties
-pipeline.plugins=lineassembler,raw,grid,html,stats,recorder
-assembler.strategy=prefixdate
-assembler.datePattern=yyyy-MM-dd HH:mm:ss
-tail.enabled=true
-tail.intervalMs=500
-grid.maxRows=50000
-```
+# 有効なプラグイン ID（カンマ区切り）。未設定時は全プラグインが有効
+enabled.plugins=raw,html,grid,stats,recorder,...
 
-Uses `java.util.Properties` only — no XML or JSON parser needed.
-
----
-
-## Architecture
-
-```
-LogSource (File / stdin / socket)
-    │
-    ▼
-StreamReader  (BufferedReader — background thread)
-    │  LogEvent (raw line)
-    ▼
-LogPipeline
-    │
-    ├──► LineAssemblerPlugin      assembles lines → LogRecord     (headless)
-    │         │  LogRecord (rawLines + empty fields)
-    │         ▼
-    ├──► FieldExtractorPlugin    extracts key/value into fields  (headless)
-    │         │  LogRecord (fields populated)
-    │         ▼
-    ├──► LevelNormalizerPlugin   maps 日本語 → ERROR/WARN/...    (headless, optional)
-    │         │
-    │         ▼
-    ├──► FilterPlugin            keeps / drops records           (headless)
-    │
-    ├──► RawStreamPlugin         renders every raw line          (Tab: Raw)
-    ├──► GridPlugin              tabular view                    (Tab: Grid)
-    ├──► HtmlPlugin              styled HTML                     (Tab: HTML)
-    ├──► StatsPlugin             counts / error rate graph       (Tab: Stats)
-    └──► RecorderPlugin          writes stream to file           (Tab: Recorder)
+# 最近開いたファイル（最大 10 件）
+recent.count=2
+recent.0.path=/abs/path/to/app.log
+recent.0.tail=true
+recent.0.tailOnly=false
+recent.1.path=/abs/path/to/sample.log
+recent.1.tail=false
+recent.1.tailOnly=false
 ```
 
 ---
 
-## Data Model
+## データモデル
 
-### LogEvent — raw token from stream
+### LogEvent — ストリームからの生トークン
+
 ```java
 record LogEvent(String rawLine, long offsetBytes, Instant receivedAt) {}
 ```
 
-### LogRecord — loosely typed, open structure
-
-Fixed fields are kept to the absolute minimum. Everything else goes into a
-free-form `fields` map so plugins can extract and add whatever they find.
+### LogRecord — 組み立て済みレコード
 
 ```java
 record LogRecord(
-    List<String>        rawLines,  // all original lines (always present)
-    Map<String, String> fields     // anything extracted — no schema enforced
+    List<String>        rawLines,  // 全原文行（常に存在）
+    Map<String, String> fields     // 抽出されたフィールド（スキーマなし、ミュータブル）
 ) {
-    // Convenience accessors for well-known keys (all nullable)
-    public String timestamp() { return fields.get("timestamp"); }
-    public String level()     { return fields.get("level"); }
-    public String message()   { return fields.get("message"); }
-    public String get(String key) { return fields.get(key); }
+    public String timestamp()      { return fields.get("timestamp"); }
+    public String level()          { return fields.get("level"); }
+    public String thread()         { return fields.get("thread"); }
+    public String message()        { return fields.get("message"); }
+    public String get(String key)  { return fields.get(key); }
 }
 ```
 
-### Well-known field keys (by convention, not enforced)
+### Well-known フィールドキー
 
-| Key | Example value | Notes |
-|---|---|---|
-| `timestamp` | `2026-03-16 14:22:01.123` | raw string, not parsed to Instant |
-| `level` | `エラー`, `ERROR`, `警告` | Japanese or English — no normalization by default |
-| `message` | `チェック呼び出し結果：OK` | first line after timestamp+level |
-| `level.normalized` | `ERROR` | optional, set by a NormalizerPlugin |
-
-Any plugin can add arbitrary keys — e.g. `id`, `name`, `result`, etc.
-
-### Level normalization (optional plugin)
-
-A `LevelNormalizerPlugin` maps locale-specific terms to standard values:
-
-```properties
-# config.properties
-level.map.エラー=ERROR
-level.map.警告=WARN
-level.map.情報=INFO
-level.map.デバッグ=DEBUG
-```
-
-Plugins that need normalized levels read `level.normalized` instead of `level`.
+| キー | 内容 |
+|---|---|
+| `timestamp` | タイムスタンプ文字列（例: `2026-03-16 14:22:01.123`） |
+| `level` | 原文レベル（例: `エラー`） |
+| `level.normalized` | 正規化後レベル（`ERROR` / `WARN` / `INFO` / `DEBUG`） |
+| `thread` | スレッド名 |
+| `message` | 1行目のメッセージ本文 |
+| `_peek` | `"true"` のとき Live Tail のプレビュー行（確定前）。プラグインはカウントや挿入をスキップする |
 
 ---
 
-## Field Extraction (custom data structures)
+## Plugin インターフェース
 
-Log lines with unusual structure like:
-
-```
-id/name:10/john
-チェック呼び出し結果：OK
-```
-
-are handled by **FieldExtractorPlugin** — a headless plugin that runs after
-assembly and adds extracted values into `LogRecord.fields`.
-
-```java
-public interface FieldExtractor {
-    // receives a single line from the record; adds keys into target map
-    void extract(String line, Map<String, String> target);
-}
-```
-
-### Built-in extractors
-
-| Extractor | Pattern matched | Fields added |
-|---|---|---|
-| `SlashPairExtractor` | `key1/key2:val1/val2` | `id=10`, `name=john` |
-| `ColonExtractor` | `key：value` or `key:value` | `チェック呼び出し結果=OK` |
-| `RegexExtractor` | configurable regex with named groups | any group name → field key |
-
-Extractors are also loadable from external plugins (same `ServiceLoader` pattern).
-
----
-
-## Plugin API  (`plugin-api.jar`)
-
-```
-com.logviewer.api
-├── Plugin.java              (interface)
-├── PluginUI.java            (interface)
-├── LogEvent.java            (record)
-├── LogRecord.java           (record)
-└── LineAssemblerStrategy.java (interface)
-```
-
-### Plugin interface
 ```java
 public interface Plugin {
     String id();
-    String displayName();
-    void onEvent(LogEvent event);     // raw line
-    void onRecord(LogRecord record);  // assembled record
+    String tabLabel();                          // タブ表示名
+    void onEvent(LogEvent event);               // 生行ごとに呼ばれる
+    default void onRecord(LogRecord record) {}  // 組み立て済みレコードごと
     void onEndOfStream();
-    PluginUI getUI();                 // null for headless plugins
-}
-```
+    JComponent getComponent();                  // null の場合はタブを持たない（headless）
 
-### PluginUI interface
-```java
-public interface PluginUI {
-    JComponent getComponent();
-    String     getTabLabel();
-    Icon       getTabIcon();   // nullable
-    void       clear();
+    default void init(Map<String, Object> context) {}
+    // context の既知キー:
+    //   "addSource" → Consumer<LogSource>  新しいソースタブを開く（RecorderPlugin が使用）
+
+    default int priority() { return 0; }
+    // 小さい値ほど先に実行。headless enrichment プラグインは負の値を使う
 }
 ```
 
 ---
 
-## Line Assembly
-
-`LineAssemblerPlugin` uses a strategy to decide record boundaries.
-
-```java
-public interface LineAssemblerStrategy {
-    boolean isNewRecord(String line, String previousLine);
-}
-```
-
-### Log format (confirmed)
-
-A record starts at a line that begins with a timestamp. All subsequent lines
-that do **not** start with a timestamp belong to the same record (e.g. stack
-traces, multi-line messages).
+## アーキテクチャ
 
 ```
-2026-03-16 14:22:01.123 INFO  [main] Starting application
-2026-03-16 14:22:01.456 ERROR [worker-1] Something failed
-    at com.example.Foo.bar(Foo.java:42)       ← continuation (no timestamp)
-    at com.example.Main.run(Main.java:10)      ← continuation (no timestamp)
-2026-03-16 14:22:02.000 INFO  [main] Shutdown complete
+FileLogSource
+    │
+    ▼ (reader-<name> スレッド — ソースごとに独立)
+FileLineReader (NIO FileChannel + ポーリング)
+    │ null → idle (tail モード時)
+    ▼
+LineAssembler (PrefixDateStrategy)
+    │ LogRecord
+    ▼
+LogPipeline — 各ソースが独立インスタンスを持つ
+    │
+    ├── FieldExtractorPlugin   (priority -20, headless)  フィールド抽出
+    ├── LevelNormalizerPlugin  (priority -10, headless)  日本語レベル正規化
+    │
+    ├── RawStreamPlugin        (priority  0)  生テキスト表示
+    ├── GridPlugin             (priority  0)  フィルタ付きテーブル表示
+    ├── HtmlPlugin             (priority  0)  カラー HTML 表示
+    ├── StatsPlugin            (priority  0)  レベル別統計グラフ
+    ├── MethodTraceHtmlPlugin  (priority  0)  メソッドトレース表
+    ├── CheckResultHtmlPlugin  (priority  0)  チェック結果 HTML 表
+    ├── RecorderPlugin         (priority  0)  ストリーム録画
+    └── [外部プラグイン ...]
+             │
+             ▼ SwingUtilities.invokeLater
+            EDT（UI 更新）
 ```
 
-### Active strategy: `PrefixDateStrategy`
+**複数ソース時の挙動**: ソースごとに独立したスレッドとプラグインインスタンスを持つ。
+非アクティブなソースのプラグインも裏でデータを蓄積し続ける。ソースを切り替えた瞬間に溜まったデータが表示される。
 
-```java
-// new record = line starts with a timestamp pattern
-private static final Pattern TIMESTAMP =
-    Pattern.compile("^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}");
+---
 
-public boolean isNewRecord(String line, String previousLine) {
-    return TIMESTAMP.matcher(line).find();
-}
-```
+## Live Tail
 
-Configured via `config.properties`:
-```properties
-assembler.strategy=prefixdate
-assembler.datePattern=yyyy-MM-dd HH:mm:ss
-```
+`FileLineReader` が `FileChannel` を 200ms ごとにポーリングする。
 
-### Other available strategies (for future use)
+### 開始位置の選択
 
-| Strategy | Rule |
+ファイルを Live Tail で開く際（メニューから、または最近開いたファイルから）、毎回ダイアログで選択する。
+
+| 選択肢 | 動作 | `tailOnly` フラグ |
+|---|---|---|
+| 先頭から読む＋監視 | ファイル先頭から読んで EOF 以降を監視 | `false` |
+| 末尾から監視のみ | `channel.position(channel.size())` で末尾にシークしてから監視 | `true` |
+
+`tailOnly=true` はメモリ節約とノイズ削減のために大きいファイルで有効。
+
+### Peek（プレビュー）
+
+idle 時（読み込む行がない）に `LineAssembler.peek()` を呼び、現在バッファ中の未確定レコードを
+`_peek=true` フィールド付きで全プラグインに送る。プラグインはこのレコードを前回の peek と
+差し替えて表示し、確定したら通常レコードで置換する。
+
+---
+
+## フィールド抽出
+
+`FieldExtractorPlugin`（headless, priority -20）が継続行を各 `FieldExtractor` に渡す。
+
+| Extractor | マッチパターン | 例 | 追加フィールド |
+|---|---|---|---|
+| `ColonExtractor` | `key：value` または `key:value` | `チェック呼び出し結果：OK` | `チェック呼び出し結果=OK` |
+| `SlashPairExtractor` | `k1/k2/…:v1/v2/…` | `id/name:10/john` | `id=10`, `name=john` |
+
+`LevelNormalizerPlugin`（priority -10）は `level` フィールドを見て `level.normalized` を追加する。
+
+| 原文 | 正規化後 |
 |---|---|
-| `LevelPrefixStrategy` | new record if line starts with INFO/WARN/ERROR/DEBUG |
-| `RegexStrategy` | new record if line matches a configurable regex |
-| `IndentContinuationStrategy` | continuation if line starts with whitespace |
-| `PassthroughStrategy` | every line = one record (fallback) |
+| エラー | ERROR |
+| 警告 | WARN |
+| 情報 | INFO |
+| デバッグ | DEBUG |
 
 ---
 
-## Built-in Plugins
+## 組み込みプラグイン詳細
 
 ### RawStreamPlugin
-- Input: `LogEvent`
-- Render: `JTextArea` — appends every raw line
-- Tab label: **Raw**
+- 入力: `LogEvent`
+- 表示: `JTextArea` — 生行を追記
+- メモリ管理: 2MB 超過で先頭 1MB を削除（行境界で切る）
+- タブ: **Raw**
 
 ### GridPlugin
-- Input: `LogRecord`
-- Render: `JTable` with columns: timestamp, level, thread, logger, message
-- Features: column sorting, max-rows cap (`grid.maxRows`)
-- Tab label: **Grid**
+- 入力: `LogRecord`
+- 表示: `JTable`（列: Timestamp / Level / Thread / Message / 内容 / Lines）
+- 機能: レベル別行カラー / キーワード＋レベルフィルタ / 列ソート
+- メモリ管理: 100,000 行超過で先頭行をローリング削除
+- `_level`（非表示列）で `TableRowSorter` + `LevelColorRenderer` が色付け
+- タブ: **Grid**
 
 ### HtmlPlugin
-- Input: `LogRecord`
-- Render: `JEditorPane` with inline HTML
-- Level color coding (ERROR=red, WARN=orange, INFO=blue, DEBUG=grey)
-- Tab label: **HTML**
+- 入力: `LogRecord`
+- 表示: `JEditorPane`（HTMLDocument）— レベル別背景色
+- メモリ管理: 5,000 件上限。超過時に警告バナーを挿入して以降をスキップ
+- スクロール保持: `DefaultCaret.NEVER_UPDATE` + 挿入前後で位置を保存・復元
+- タブ: **HTML**
 
 ### StatsPlugin
-- Input: `LogRecord`
-- Render: custom-painted panel — counts per level, errors/sec graph
-- Tab label: **Stats**
+- 入力: `LogRecord`（`_peek=true` はスキップ）
+- 表示: カスタム描画パネル — レベル別カウントと棒グラフ
+- タブ: **Stats**
+
+### MethodTraceHtmlPlugin
+- 入力: `LogRecord`
+- 対象: message に「メソッド呼び出し開始」/ 「メソッド呼び出し終了」を含むレコード
+- ペアリングキー: `thread + ":" + method`
+- 終了ログが来た時点でテーブル行を挿入（開始のみの場合は `onEndOfStream()` 時に「未完了」として挿入）
+- 戻り値: `戻り値` フィールド（シンプル値）または `戻り値.fieldName` プレフィックス（オブジェクト）
+- 戻り値カラー: SUCCESS/OK/ALLOW=緑、ERROR/NG/FAIL/DENY=赤、未完了=黄
+- タブ: **メソッドトレース**
+
+### CheckResultHtmlPlugin
+- 入力: `LogRecord`（`チェック呼び出し結果` フィールドを持つもののみ）
+- 表示: HTML テーブル — 日時 / チェック ID / 呼び出し結果 / 引き渡しパラメータ
+- 色: OK=ライトグリーン、NG=レッド
+- タブ: **チェック結果**
 
 ### RecorderPlugin
-- Input: `LogEvent` (raw lines)
-- UI: Start / Stop buttons + status label + current file path
-- On **Start**: opens `FileWriter` → `./recordings/log-<ISO-timestamp>.log`
-- On **Stop**: flushes, closes the writer, enables **「ソースとして開く」** button
-- **「ソースとして開く」**: adds the saved file to the Source List as a new `FileLogSource` — pipeline starts immediately, no manual file browsing needed
-- Tab label: **Recorder**
+- 入力: `LogEvent`（生行）
+- UI: Start / Stop / 「ソースとして開く」ボタン
+- 録画先: `./recordings/log-<ISO-timestamp>.log`
+- `init(context)` で `addSource` コールバックを受け取る（ServiceLoader 要件でコンストラクタ引数不可）
+- タブ: **Recorder**
 
-### HtmlFileRendererPlugin
-- Input: reads a log file (e.g. a recording)
-- UI: file picker / dropdown + `JEditorPane`
-- Uses `PrefixDateStrategy` (format confirmed — timestamp-delimited records)
-- Renders assembled `LogRecord`s as styled HTML
-- Tab label: **File Viewer**
-
-### CheckResultTablePlugin  *(external plugin — `./plugins/`)*
-- Input: `LogRecord` (fields populated by `FieldExtractorPlugin`)
-- Filters: only records that contain a check-result field (e.g. `チェック呼び出し結果`)
-- Renders: `JTable` with columns — タイムスタンプ / チェック名 / 結果 / 詳細
-- `NG` rows highlighted in red via `TableCellRenderer`
-- Tab label: **チェック結果**
-
-```
-┌──────────────┬──────────────┬──────────┬─────────────────┐
-│ タイムスタンプ │  チェック名   │  結果    │  詳細           │
-├──────────────┼──────────────┼──────────┼─────────────────┤
-│  14:22:01    │  接続チェック  │  ✓ OK   │  id=10 name=john│
-│  14:22:02    │  認証チェック  │  ✗ NG   │  code=401       │
-│  14:22:03    │  DBチェック   │  ✓ OK   │  rows=42        │
-└──────────────┴──────────────┴──────────┴─────────────────┘
-```
+### CheckResultTablePlugin（外部 JAR）
+- 入力: `LogRecord`（全フィールドを表示）
+- 表示: `JTable`（列: Timestamp / Field / Value）
+- タブ: **Check Results**
 
 ---
 
-## Plugin Loading
+## プラグイン選択と永続化
 
-### Built-in plugins
-Loaded via `ServiceLoader.load(Plugin.class)` from the app classpath.
+起動時に `ExternalPluginLoader.loadPlugins()` を呼んでメタデータ（id / tabLabel / priority）を取得し、
+メニューバーの **Plugins** メニューにチェックボックスとして表示する。
 
-### External plugins
-```java
-Path pluginDir = Path.of("plugins");   // beside the running JAR only
+- チェックを外したプラグインは次にファイルを開いた時から読み込まれない
+- 選択状態は `~/.logviewer/config.properties` の `enabled.plugins` に保存
+- 初回起動時（未設定）はすべてのプラグインが有効
 
-URL[] jarUrls = {};
-if (Files.isDirectory(pluginDir)) {
-    jarUrls = Files.list(pluginDir)
-        .filter(p -> p.toString().endsWith(".jar"))
-        .map(p -> p.toUri().toURL())
-        .toArray(URL[]::new);
-}
+---
 
-URLClassLoader pluginClassLoader =
-    new URLClassLoader(jarUrls, AppMain.class.getClassLoader());
+## 外部プラグイン開発
 
-ServiceLoader<Plugin> external =
-    ServiceLoader.load(Plugin.class, pluginClassLoader);
-```
-
-### External plugin JAR contract
-1. Compile against `plugin-api.jar`
-2. Implement `com.logviewer.api.Plugin`
-3. Declare in `META-INF/services/com.logviewer.api.Plugin`
-4. Drop JAR into `./plugins/`
+1. `app` プロジェクトを `compileOnly` 依存として追加
+2. `com.logviewer.plugin.Plugin` インターフェースを実装
+3. `META-INF/services/com.logviewer.plugin.Plugin` に実装クラス名を記載
+4. JAR を `./plugins/` に配置 → 次回起動時に Plugins メニューに自動追加
 
 ```
 myplugin.jar
 ├── com/example/MyPlugin.class
 └── META-INF/services/
-    └── com.logviewer.api.Plugin    ← "com.example.MyPlugin"
+    └── com.logviewer.plugin.Plugin   ← "com.example.MyPlugin"
 ```
 
-> Plugins run fully trusted — no `SecurityManager` in Java 17.
+すべての JAR は単一の `URLClassLoader` で読み込まれるため、同一 `plugins/` 内の JAR 同士はクラスを参照できる。
 
 ---
 
-## Threading Model
+## スレッドモデル
 
-| Thread | Responsibility |
+| スレッド | 役割 |
 |---|---|
-| **EDT** (Swing) | All UI updates |
-| **Reader thread** (1 per source) | Reads `InputStream`, produces `LogEvent` into a `BlockingQueue` |
-| **Pipeline thread** (1 per source) | Drains queue, calls headless plugins, assembles `LogRecord`s |
-| **Render plugins** | Post to EDT via `SwingUtilities.invokeLater` |
+| **EDT** (Swing) | 全 UI 更新 |
+| **reader-\<name\>** (ソースごとに 1 本) | `FileLineReader` でポーリング → `LogPipeline` でレコード組み立て → プラグイン呼び出し |
+
+プラグインの UI 更新はすべて `SwingUtilities.invokeLater` 経由で EDT に委譲する。
+複数ソースが開いていても各スレッドは独立して動作する。
 
 ---
 
-## Look and Feel
-
-```java
-// 起動時に設定 — Windows風のシステムLaFを使用
-try {
-    UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
-} catch (Exception e) {
-    // fallback to default Metal LaF — no crash
-}
-```
-
-- **Windows環境**: `WindowsLookAndFeel` が自動適用される
-- **macOS / Linux**: システムのネイティブLaFにフォールバック（同じコードで動く）
-- カスタムテーマ・独自フォント・装飾は**一切なし** — シンプルを維持
-- ウィンドウ、ボタン、テーブル、タブはすべてデフォルトのシステム標準コンポーネントをそのまま使用
-
----
-
-## GUI Layout
+## GUI レイアウト
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│  Menu: File | View | Plugins | Settings                         │
-├────────────────┬────────────────────────────────────────────────┤
-│  Sources       │  [Raw] [Grid] [HTML] [Stats] [Recorder]        │
-│  (JList)       │  [チェック結果] ...                             │
-│                │                                                 │
-│  ● app.log     │  <active plugin renders here>                  │
-│    (live tail) │                                                 │
-│  ● log-14-22   │                                                 │
-│    (recording) │                                                 │
-│                │                                                 │
-├────────────────┴────────────────────────────────────────────────┤
-│  Status: lines read: 1,042 | records: 998 | tail: ON            │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│  File | Plugins                                                      │
+├────────────────┬────────────────────────────────────────────────────┤
+│  Sources       │  [Raw] [Grid] [HTML] [Stats] [メソッドトレース]     │
+│  (JList)       │  [チェック結果] [Recorder] [Check Results] ...      │
+│                │                                                      │
+│  ● app.log     │  <アクティブプラグインの描画エリア>                  │
+│    [tail]      │                                                      │
+│  ● recording   │                                                      │
+│                │                                                      │
+├────────────────┴────────────────────────────────────────────────────┤
+│  Status: app.log | lines: 1,042 | records: 998 | tail: ON           │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
-- **Left panel**: open log sources — click to switch active pipeline
-- **Right panel**: `JTabbedPane` — one tab per render plugin
-- Each source gets its own `LogPipeline` and **independent plugin instances**
-- Live sources and recording files coexist simultaneously in the source list
-- **Status bar**: live counters + tail indicator
+- **左パネル**: ソースリスト（クリックでタブ切り替え）
+- **右パネル**: `JTabbedPane` — 有効なプラグインのタブを表示
+- ソースごとに独立した `LogPipeline` + プラグインインスタンス
+- ステータスバー: 現在選択中のソースの行数・レコード数・tail 状態
 
 ---
 
-## Use Case: 時間帯チェック結果の可視化
+## メモリ管理方針
 
-典型的なワークフロー:
+| プラグイン | 上限 | 超過時の挙動 |
+|---|---|---|
+| RawStreamPlugin | 2 MB | 先頭 1 MB を削除（行境界） |
+| GridPlugin | 100,000 行 | 先頭行をローリング削除 |
+| HtmlPlugin | 5,000 件 | 以降の挿入を停止し警告バナー表示 |
+| MethodTraceHtmlPlugin | なし（確定行のみ蓄積） | — |
+| CheckResultHtmlPlugin | なし | — |
 
-```
-1. app.log をライブ監視中
-        │
-        ▼
-2. [Recorder] Start → 問題のある時間帯を録画 → Stop
-        │
-        ▼
-3. [→ ソースとして開く] ボタンを押す
-        │
-        ▼
-4. Source List に録画ファイルが追加される
-   新しい LogPipeline が起動（tail なし、一気に読み切る）
-        │
-        ▼
-5. [チェック結果] タブを選択
-   その時間帯のチェック処理結果がテーブルに一覧表示される
-```
-
-ポイント:
-- ライブの `app.log` パイプラインとは**完全に独立**
-- 録画ファイルは `tail.enabled=false` で動作 — EOF で停止
-- `CheckResultTablePlugin` は外部JARなので本体を変更せず追加可能
-
----
-
-## Tail Mode
-
-Uses `java.nio.file.WatchService` to detect file growth.
-
-```properties
-tail.enabled=true
-tail.intervalMs=500
-```
-
----
-
-## Implementation Plan
-
-各フェーズは**単独で起動・動作確認できる**状態で完結する。
-
----
-
-### Phase 1 — ウィンドウが開く
-
-**目標**: アプリが起動してウィンドウが表示される
-
-- `AppMain` — `main()` エントリポイント
-- `UIManager.setLookAndFeel(システムLaF)`
-- `MainWindow` — `JFrame` + Source List(空) + `JTabbedPane`(空) + ステータスバー
-- ハードコードのサンプルログ行を `JTextArea` に表示（配線なし）
-
-**確認**: ウィンドウが開き、Windows風の見た目になっている
-
----
-
-### Phase 2 — ファイルを読んでRawタブに表示
-
-**目標**: ログファイルを読んで生テキストを表示する
-
-- `LogSource` / `FileLogSource`
-- `LogEvent` (record)
-- `StreamReader` — バックグラウンドスレッドでファイルを読む
-- `RawStreamPlugin` — `LogEvent` を受け取り `JTextArea` に追記
-- Source List にファイルを1件追加してパイプラインを接続
-
-**確認**: ファイルを指定するとRawタブに全行が流れてくる
-
----
-
-### Phase 3 — レコード組み立て + Gridタブ
-
-**目標**: 複数行をまとめてLogRecordにして構造化表示する
-
-- `LogRecord` (record — rawLines + fields map)
-- `LineAssemblerPlugin` + `PrefixDateStrategy`
-- `LogPipeline` — `BlockingQueue` + パイプラインスレッド
-- `GridPlugin` — `LogRecord` を `JTable` に表示（列: timestamp / level / message）
-
-**確認**: スタックトレースが1レコードにまとまってGridに表示される
-
----
-
-### Phase 4 — Tailモード（ライブ監視）
-
-**目標**: ファイルに追記されたら自動で画面に反映される
-
-- `WatchService` によるファイル監視
-- `tail.enabled=true` 設定の読み込み
-- ステータスバーに `tail: ON` 表示
-
-**確認**: 別ターミナルでログファイルに行を追記すると画面がリアルタイムに更新される
-
----
-
-### Phase 5 — フィールド抽出 + HTMLタブ
-
-**目標**: ログ内の独自データ構造を解析してHTMLで色付き表示する
-
-- `FieldExtractor` インターフェース
-- `FieldExtractorPlugin` — `SlashPairExtractor` / `ColonExtractor`
-- `LevelNormalizerPlugin` — `エラー→ERROR` などのマッピング
-- `HtmlPlugin` — `JEditorPane` でレベル別カラー表示
-
-**確認**: `id/name:10/john` が `id=10, name=john` としてフィールドに入る。HTMLタブでエラーが赤く表示される
-
----
-
-### Phase 6 — 複数ソース + Recorder
-
-**目標**: ライブ監視しながら録画し、録画ファイルを別ソースとして開ける
-
-- Source List の複数エントリ管理（ソースごとに独立した `LogPipeline`）
-- `RecorderPlugin` — Start/Stop + `FileWriter` → `./recordings/`
-- **「ソースとして開く」** ボタン — Stop後に有効化、押すとSource Listに追加
-
-**確認**:
-1. ライブ監視中にRecorderでStart→Stop
-2. 「ソースとして開く」を押す
-3. Source Listに録画ファイルが追加され、その内容がGridに表示される
-4. ライブの方は影響を受けていない
-
----
-
-### Phase 7 — Stats + 外部プラグインローディング
-
-**目標**: グラフ表示と外部JAR読み込みが動く
-
-- `StatsPlugin` — レベル別カウント + `paintComponent` で棒グラフ
-- `URLClassLoader` + `ServiceLoader` による `./plugins/*.jar` 読み込み
-- 空の `./plugins/` ディレクトリでも起動が壊れないことを確認
-
-**確認**: Statsタブにカウントが表示される。`./plugins/` にJARを置くと追加タブが出る
-
----
-
-### Phase 8 — CheckResultTablePlugin（外部JARサンプル）
-
-**目標**: 外部プラグインとして `CheckResultTablePlugin` を実装・動作確認する
-
-- `plugin-api.jar` を独立ビルド
-- `CheckResultTablePlugin` を別プロジェクトとしてビルド → `./plugins/` に配置
-- チェック結果レコードをテーブル表示、NG行赤ハイライト
-
-**確認**:
-1. Phase 6の録画ファイルをソースとして開く
-2. チェック結果タブにその時間帯の結果一覧が表示される
-3. NGの行が赤くなっている
-
----
-
-### フェーズ依存関係
-
-```
-Phase 1 (ウィンドウ)
-    │
-    └─► Phase 2 (Raw表示)
-              │
-              └─► Phase 3 (レコード組み立て + Grid)
-                        │
-                        ├─► Phase 4 (Tail)
-                        │
-                        └─► Phase 5 (フィールド抽出 + HTML)
-                                  │
-                                  └─► Phase 6 (複数ソース + Recorder)
-                                            │
-                                            └─► Phase 7 (Stats + 外部プラグイン)
-                                                          │
-                                                          └─► Phase 8 (CheckResultTable)
-```
+`HTMLDocument` への DOM 削除は破損リスクがあるため、HtmlPlugin は削除ではなく上限停止方式を採用。
