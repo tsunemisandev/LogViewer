@@ -1,0 +1,12 @@
+plugins {
+    id 'java'
+}
+
+dependencies {
+    // app provides Plugin API, model, source, pipeline at compile time
+    compileOnly project(':app')
+}
+
+jar {
+    archiveFileName = 'builtin-plugins.jar'
+}

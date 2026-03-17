@@ -1,0 +1,8 @@
+com.logviewer.plugin.FieldExtractorPlugin
+com.logviewer.plugin.LevelNormalizerPlugin
+com.logviewer.plugin.GridPlugin
+com.logviewer.plugin.HtmlPlugin
+com.logviewer.plugin.StatsPlugin
+com.logviewer.plugin.RecorderPlugin
+com.logviewer.plugin.CheckResultHtmlPlugin
+com.logviewer.plugin.MethodTraceHtmlPlugin

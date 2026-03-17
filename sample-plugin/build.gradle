@@ -1,0 +1,11 @@
+plugins {
+    id 'java'
+}
+
+dependencies {
+    compileOnly project(':app')
+}
+
+jar {
+    archiveFileName = 'check-result-table-plugin.jar'
+}

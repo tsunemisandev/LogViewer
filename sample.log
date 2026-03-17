@@ -1,0 +1,81 @@
+2026-03-16 14:22:00.000 情報 [main] アプリケーション起動
+2026-03-16 14:22:01.000 情報 [worker-1] メソッド呼び出し開始
+    行名：注文処理
+    メソッド：com.example.OrderService#processOrder
+    引数：orderId=12345, userId=alice
+2026-03-16 14:22:01.100 情報 [worker-1] 認証チェック開始
+2026-03-16 14:22:01.456 情報 [worker-1] 認証チェック完了
+    チェック呼び出し結果：OK
+    id/チェック名/ユーザー:101/認証チェック/alice
+2026-03-16 14:22:01.500 情報 [worker-1] メソッド呼び出し終了
+    メソッド：com.example.OrderService#processOrder
+    戻り値.orderId：12345
+    戻り値.status：SUCCESS
+    戻り値.totalAmount：9800
+2026-03-16 14:22:02.000 情報 [worker-2] メソッド呼び出し開始
+    行名：DB照会
+    メソッド：com.example.DatabaseService#queryOrders
+    引数：userId=alice, limit=50
+2026-03-16 14:22:02.000 情報 [worker-2] DBチェック開始
+2026-03-16 14:22:02.380 エラー [worker-2] DBチェック失敗
+    チェック呼び出し結果：NG
+    id/チェック名/テーブル:102/DBチェック/orders
+    エラーコード：E_TIMEOUT
+2026-03-16 14:22:02.400 エラー [worker-2] メソッド呼び出し終了
+    メソッド：com.example.DatabaseService#queryOrders
+    戻り値.status：ERROR
+    戻り値.errorCode：E_TIMEOUT
+    戻り値.message：Connection timed out after 3000ms
+2026-03-16 14:22:02.900 情報 [worker-1] メソッド呼び出し開始
+    行名：権限検証
+    メソッド：com.example.AuthService#validatePermission
+    引数：userId=alice, resource=orders, action=READ
+2026-03-16 14:22:02.900 情報 [worker-1] 権限チェック開始
+2026-03-16 14:22:03.150 情報 [worker-1] 権限チェック完了
+    チェック呼び出し結果：OK
+    id/チェック名/ユーザー:103/権限チェック/alice
+2026-03-16 14:22:03.200 情報 [worker-1] メソッド呼び出し終了
+    メソッド：com.example.AuthService#validatePermission
+    戻り値：ALLOW
+2026-03-16 14:22:03.700 警告 [worker-3] レスポンス遅延検知
+2026-03-16 14:22:04.000 情報 [worker-3] メソッド呼び出し開始
+    行名：ユーザー情報取得
+    メソッド：com.example.UserService#findById
+    引数：userId=alice
+2026-03-16 14:22:04.200 情報 [worker-3] メソッド呼び出し終了
+    メソッド：com.example.UserService#findById
+    戻り値.id：alice
+    戻り値.name：Alice Yamamoto
+    戻り値.role：ADMIN
+    戻り値.lastLogin：2026-03-16T14:00:00
+2026-03-16 14:22:04.300 エラー [worker-2] 外部API チェック失敗
+    チェック呼び出し結果：NG
+    id/チェック名/エンドポイント:104/外部APIチェック/https://api.example.com/health
+    HTTPステータス：503
+2026-03-16 14:22:04.500 情報 [worker-2] メソッド呼び出し開始
+    行名：外部API呼び出し
+    メソッド：com.example.ApiClient#callHealthCheck
+    引数：endpoint=https://api.example.com/health, timeout=3000
+2026-03-16 14:22:04.800 エラー [worker-2] メソッド呼び出し終了
+    メソッド：com.example.ApiClient#callHealthCheck
+    戻り値.httpStatus：503
+    戻り値.result：FAIL
+    戻り値.retryAfter：30
+2026-03-16 14:22:04.900 情報 [worker-3] キャッシュチェック開始
+2026-03-16 14:22:05.020 情報 [worker-3] キャッシュチェック完了
+    チェック呼び出し結果：OK
+    id/チェック名/キー数:105/キャッシュチェック/2048
+2026-03-16 14:22:05.500 情報 [worker-1] セッションチェック失敗
+    チェック呼び出し結果：NG
+    id/チェック名/セッションID:106/セッションチェック/sess-8f3a2
+    エラーコード：E_SESSION_EXPIRED
+2026-03-16 14:22:06.300 情報 [worker-2] ディスク使用率チェック開始
+2026-03-16 14:22:06.510 情報 [worker-2] ディスク使用率チェック完了
+    チェック呼び出し結果：OK
+    id/チェック名/使用率:107/ディスク使用率チェック/72%
+2026-03-16 14:22:06.800 情報 [worker-2] メソッド呼び出し開始
+    行名：レポート生成
+    メソッド：com.example.ReportService#generateSummary
+    引数：date=2026-03-16, format=PDF
+2026-03-16 14:22:07.000 情報 [main] 全チェック処理完了
+2026-03-16 14:22:07.500 情報 [main] シャットダウン完了

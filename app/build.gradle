@@ -1,0 +1,25 @@
+plugins {
+    id 'java'
+    id 'application'
+}
+
+application {
+    mainClass = 'com.logviewer.AppMain'
+}
+
+run {
+    // Working directory is the project root so ./plugins/ and ./recordings/ resolve correctly
+    workingDir = rootProject.projectDir
+}
+
+// Copy plugin JARs into <root>/plugins/ before running
+tasks.register('copyPlugins', Copy) {
+    dependsOn ':builtin-plugins:jar', ':sample-plugin:jar'
+    from project(':builtin-plugins').tasks.named('jar')
+    from project(':sample-plugin').tasks.named('jar')
+    into rootProject.layout.projectDirectory.dir('plugins')
+}
+
+tasks.named('run').configure {
+    dependsOn 'copyPlugins'
+}

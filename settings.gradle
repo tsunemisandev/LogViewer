@@ -1,0 +1,3 @@
+rootProject.name = 'log-viewer'
+
+include 'app', 'builtin-plugins', 'sample-plugin'
